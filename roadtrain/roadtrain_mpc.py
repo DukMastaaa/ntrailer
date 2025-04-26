@@ -11,50 +11,52 @@ def wrap_to_pi(theta):
     return (theta + np.pi) % (2*np.pi) - np.pi
 
 
-class RoadTrain:
+class GeneralNTrailer1Steer:
     def __init__(self, pos0: NDArray, wheelbase0: float, track0: float):
         self.pos_front = pos0.astype(np.float32)
         self.thetas = [0.0]
         self.wheelbases = [wheelbase0]
         self.tracks = [track0]
         self.bar_dists = [wheelbase0]
-        self.idx_to_steering_idx = {0: 0}
-        self.steering_angles = [0.0]
+        self.hitch_dists = [0]
+        self.steering_angle = 0.0
     
-    def add_trailer(self, wheelbase: float, track: float, bar_dist: float, has_steering: bool):
-        new_i = len(self.thetas)
+    def add_trailer(self, wheelbase: float, track: float, bar_dist: float, hitch_dist: float):
         self.thetas.append(self.thetas[-1])  # line up with car in front
         self.wheelbases.append(wheelbase)
         self.tracks.append(track)
         self.bar_dists.append(bar_dist)
-        if has_steering:
-            self.idx_to_steering_idx[new_i] = len(self.steering_angles) 
-            self.steering_angles.append(0.0)
+        self.hitch_dists.append(hitch_dist)
     
     def reset_state(self):
         self.pos_front = [0.0] * len(self.pos_front)
         self.thetas = [0.0] * len(self.thetas)
-        self.steering_angles = [0.0] * len(self.steering_angles)
+        self.steering_angle = 0.0
     
-    def tick(self, dt: float, v: float, steering_angles: list[float]):
-        assert len(self.steering_angles) == len(steering_angles), "Different number of steering angles than expected"
-        self.steering_angles = steering_angles
+    def tick(self, dt: float, v: float, steering_angle: float):
+        self.steering_angle = steering_angle
         self.pos_front += v * dt * np.array([np.cos(self.thetas[0]), np.sin(self.thetas[0])])
+
+        vs = np.zeros_like(self.thetas)
+        dthetas = np.zeros_like(self.thetas)
+
+        vs[0] = v
+        dthetas[0] = v / self.bar_dists[0] * np.tan(self.steering_angle)
+        
+        for i in range(len(self.thetas)-1):
+            vs[i+1] = (
+                vs[i] * np.cos(self.thetas[i]-self.thetas[i+1])
+                +
+                self.hitch_dists[i+1] * np.sin(self.thetas[i]-self.thetas[i+1]) * dthetas[i]
+            )
+            dthetas[i+1] = 1 / self.bar_dists[i+1] * (
+                vs[i] * np.sin(self.thetas[i]-self.thetas[i+1])
+                -
+                self.hitch_dists[i+1] * dthetas[i] * np.cos(self.thetas[i]-self.thetas[i+1])
+            )
+
         for i in range(len(self.thetas)):
-            if i <= 1:
-                v_prev = v
-            else:
-                v_prev = v_prev * np.cos(self.thetas[i-1] - self.thetas[i])
-            if i == 0:
-                dtheta = v / self.bar_dists[0] * np.tan(steering_angles[0])
-            elif (j := self.idx_to_steering_idx.get(i, None)) is not None:
-                dtheta = v_prev / self.bar_dists[i] * (
-                    np.sin(self.thetas[i-1] - self.thetas[i])
-                    + np.tan(self.steering_angles[j]) * np.cos(self.thetas[i-1] - self.thetas[i])
-                )
-            else:
-                dtheta = v_prev / self.bar_dists[i] * np.sin(self.thetas[i-1] - self.thetas[i])
-            self.thetas[i] += dtheta * dt
+            self.thetas[i] += dthetas[i] * dt
         
     def render(self, screen: pygame.Surface, zoom: float, pos=None):
         def world_to_screen(p):
@@ -62,13 +64,14 @@ class RoadTrain:
         # Draw goal
         if pos is not None:
             pygame.draw.circle(screen, "blue", world_to_screen(pos), 5)
-        p_prev = self.pos_front
-        steering_angles = self.steering_angles
-        for i in range(len(self.thetas)):
+        p_hitch_prev = self.pos_front
+        p_this_prev = p_hitch_prev
+        n = len(self.thetas)
+        for i in range(n):
             if i > 0:
-                p_this = p_prev - self.bar_dists[i] * np.array([np.cos(self.thetas[i]), np.sin(self.thetas[i])])
+                p_this = p_hitch_prev - self.bar_dists[i] * np.array([np.cos(self.thetas[i]), np.sin(self.thetas[i])])
             else:
-                p_this = p_prev
+                p_this = p_hitch_prev
             theta = self.thetas[i]
             track = self.tracks[i]
             wheelbase = self.wheelbases[i]
@@ -82,53 +85,55 @@ class RoadTrain:
             pygame.draw.line(screen, "white", fr, br)
             pygame.draw.line(screen, "white", br, bl)
             if i > 0:
-                pygame.draw.line(screen, "white", world_to_screen(p_this), world_to_screen(p_prev))
-            if i in self.idx_to_steering_idx:
+                pygame.draw.line(screen, "cyan", world_to_screen(p_this), world_to_screen(p_hitch_prev))
+                pygame.draw.line(screen, "white", world_to_screen(p_hitch_prev), world_to_screen(p_this_prev))
+            if i == 0:
                 front = p_this + R @ np.array([wheelbase, 0])
-                d = np.array([np.cos(theta+steering_angles[0]), np.sin(theta+steering_angles[0])])
-                steering_angles = steering_angles[1:]
+                d = np.array([np.cos(theta+self.steering_angle), np.sin(theta+self.steering_angle)])
                 pygame.draw.line(screen, "red", world_to_screen(front), world_to_screen(front+2*d))
-            p_prev = p_this
+            p_this_prev = p_this
+            p_hitch_prev = p_this - (self.hitch_dists[i+1] if i+1<n else 0) * np.array([np.cos(self.thetas[i]), np.sin(self.thetas[i])])
     
 
-def setup_model(rt: RoadTrain, pos_set, theta_all_set) -> do_mpc.model.Model:
+def setup_model(rt: GeneralNTrailer1Steer, pos_set, theta_all_set) -> do_mpc.model.Model:
     model = do_mpc.model.Model(model_type="continuous", symvar_type="SX")
-    b = len(rt.thetas)
-    m = len(rt.steering_angles)
+    n = len(rt.thetas)
 
     # States
     pos = model.set_variable("_x", "pos", (2,1))
-    theta = model.set_variable("_x", "theta", (b,1))
+    theta = model.set_variable("_x", "theta", (n,1))
 
     # Inputs
     v0 = model.set_variable("_u", "v0")
-    alpha = model.set_variable("_u", "alpha", (m,1))
+    phi = model.set_variable("_u", "phi")
 
     # State derivatives
-    v = []
-    v.append(v0)
-    for i in range(1, b):
-        v.append(v[i-1] * cas.cos(theta[i-1] - theta[i]))
-    dtheta = []
-    dtheta.append(v0/rt.bar_dists[0] * cas.tan(alpha[0]))
-    for i in range(1, b):
-        if (j := rt.idx_to_steering_idx.get(i, None)) is not None:
-            dtheta.append(
-                v[i-1]/rt.bar_dists[i] * (
-                    cas.sin(theta[i-1]-theta[i]) + cas.tan(alpha[j]) * cas.cos(theta[i-1]-theta[i])
-                )
+    vs = []
+    vs.append(v0)
+    dthetas = []
+    dthetas.append(v0/rt.bar_dists[0] * cas.tan(phi[0]))
+
+    for i in range(n-1):
+        vs.append(
+            vs[i] * cas.cos(theta[i]-theta[i+1])
+            +
+            rt.hitch_dists[i+1] * cas.sin(theta[i]-theta[i+1]) * dthetas[i]
+        )
+        dthetas.append(
+            1 / rt.bar_dists[i+1] * (
+                vs[i] * cas.sin(theta[i]-theta[i+1])
+                -
+                rt.hitch_dists[i+1] * dthetas[i] * cas.cos(theta[i]-theta[i+1])
             )
-        else:
-            dtheta.append(
-                v[i-1]/rt.bar_dists[i] * cas.sin(theta[i-1]-theta[i])
-            )
-    dtheta = cas.vertcat(*dtheta)
+        )
+
+    dthetas = cas.vertcat(*dthetas)
     dpos = v0 * cas.vertcat(cas.cos(theta[0]), cas.sin(theta[0]))
     model.set_rhs("pos", dpos)
-    model.set_rhs("theta", dtheta)
+    model.set_rhs("theta", dthetas)
 
     print("dpos", dpos)
-    print("dtheta", dtheta)
+    print("dtheta", dthetas)
 
     # Setpoint
     # pos_set = model.set_variable("_tvp", "pos_set", (2,1))
@@ -148,7 +153,8 @@ def wrapped_angle_radians(theta):
     return cas.arctan2(cas.sin(theta), cas.cos(theta))
 
 
-def setup_mpc(rt: RoadTrain, model: do_mpc.model.Model, silence_solver: bool, dt: float, pred_horizon: int):
+def setup_mpc(rt: GeneralNTrailer1Steer, model: do_mpc.model.Model, silence_solver: bool,
+              dt: float, pred_horizon: int, max_iter: int):
     mpc = do_mpc.controller.MPC(model)
 
     # Set up MPC
@@ -167,6 +173,8 @@ def setup_mpc(rt: RoadTrain, model: do_mpc.model.Model, silence_solver: bool, dt
     # mpc.settings.store_full_solution = False
     mpc.settings.store_full_solution = True
 
+    mpc.settings.nlpsol_opts["ipopt"] = {"max_iter": max_iter}
+
     # IPOPT debug prints
     if silence_solver:
         mpc.settings.supress_ipopt_output()
@@ -176,8 +184,7 @@ def setup_mpc(rt: RoadTrain, model: do_mpc.model.Model, silence_solver: bool, dt
 
     # Set up running and terminal costs for MPC objective
 
-    b = model.x["theta"].rows()
-    m = model.u["alpha"].rows()
+    n = model.x["theta"].rows()
     proper_pos = model.aux["pos_set"]
     proper_theta = model.aux["theta_all_set"]
 
@@ -187,7 +194,7 @@ def setup_mpc(rt: RoadTrain, model: do_mpc.model.Model, silence_solver: bool, dt
     # )  # pos then theta
     state_error = cas.vertcat(
         model.x["pos"]-proper_pos,
-        wrapped_angle_radians(model.x["theta"]-proper_theta*cas.GenSX_ones(b))
+        wrapped_angle_radians(model.x["theta"]-proper_theta*cas.GenSX_ones(n))
     )  # pos then theta
 
     # Q_running = cas.diag([0.5, 0.5] + [0.2] + [100] * (b-1))
@@ -195,7 +202,7 @@ def setup_mpc(rt: RoadTrain, model: do_mpc.model.Model, silence_solver: bool, dt
     # Q_running = cas.diag([0, 0, 0, 0])
 
     # Q_terminal = cas.diag([0, 0, 1, 1])
-    Q_terminal = cas.diag([0, 0] + [1] * b)
+    Q_terminal = cas.diag([0, 0] + [1] * n)
 
     R_running_scalar = cas.DM(0.1)
 
@@ -204,10 +211,14 @@ def setup_mpc(rt: RoadTrain, model: do_mpc.model.Model, silence_solver: bool, dt
 
     total_pos_error = 0
     actual_pos = model.x["pos"]
-    for i in range(b):
+    for i in range(n):
         if i > 0:
-            proper_pos = proper_pos - rt.bar_dists[i] * np.array([np.cos(proper_theta), np.sin(proper_theta)])
-            actual_pos = actual_pos - rt.bar_dists[i] * np.array([np.cos(model.x["theta"][i]), np.sin(model.x["theta"][i])])
+            proper_pos = proper_pos - (rt.bar_dists[i] + rt.hitch_dists[i]) * np.array([np.cos(proper_theta), np.sin(proper_theta)])
+            actual_pos = (
+                actual_pos
+                - rt.hitch_dists[i] * np.array([np.cos(model.x["theta"][i-1]), np.sin(model.x["theta"][i-1])])
+                - rt.bar_dists[i] * np.array([np.cos(model.x["theta"][i]), np.sin(model.x["theta"][i])])
+            )
         if i == 0:
             total_pos_error += 1 * cas.sumsqr(proper_pos-actual_pos)
         else:
@@ -234,22 +245,22 @@ def setup_mpc(rt: RoadTrain, model: do_mpc.model.Model, silence_solver: bool, dt
 
     mpc.bounds["lower", "_u", "v0"] = -speed_limit  # Can drive backward
     mpc.bounds["upper", "_u", "v0"] = speed_limit
-    # mpc.bounds["lower", "_u", "alpha"] = -cas.pi/4 * cas.GenDM_ones(m)
-    # mpc.bounds["upper", "_u", "alpha"] = +cas.pi/4 * cas.GenDM_ones(m)
-    mpc.bounds["lower", "_u", "alpha"] = -np.deg2rad(60)
-    mpc.bounds["upper", "_u", "alpha"] = +np.deg2rad(60)
+    # mpc.bounds["lower", "_u", "phi"] = -cas.pi/4 * cas.GenDM_ones(m)
+    # mpc.bounds["upper", "_u", "phi"] = +cas.pi/4 * cas.GenDM_ones(m)
+    mpc.bounds["lower", "_u", "phi"] = -np.deg2rad(60)
+    mpc.bounds["upper", "_u", "phi"] = +np.deg2rad(60)
 
     # differences = []
     # for i in range(1, b):
     #     differences.append(cas.norm_1(model.x["theta"][i] - model.x["theta"][i-1]))
     # if len(differences) > 0:
     #     mpc.set_nl_cons("collision", cas.vertcat(*differences), np.deg2rad(90))
-    for i in range(1, b):
+    for i in range(1, n):
         mpc.set_nl_cons(f"collision_{i}", cas.fabs(wrapped_angle_radians(model.x["theta"][i-1] - model.x["theta"][i])), np.deg2rad(90))
 
     # for i in range(m):
-    #     mpc.bounds["lower", "_u", f"alpha_{i}"] = -cas.pi/4
-    #     mpc.bounds["upper", "_u", f"alpha_{i}"] = +cas.pi/4
+    #     mpc.bounds["lower", "_u", f"phi_{i}"] = -cas.pi/4
+    #     mpc.bounds["upper", "_u", f"phi_{i}"] = +cas.pi/4
     
     # Set obstacle constraint
 
@@ -271,7 +282,7 @@ def setup_mpc(rt: RoadTrain, model: do_mpc.model.Model, silence_solver: bool, dt
     return mpc
 
 
-def interactive(screen: pygame.Surface, rt: RoadTrain, ZOOM: float):
+def interactive(screen: pygame.Surface, rt: GeneralNTrailer1Steer, ZOOM: float):
     goal_pos = np.array([0.1, 10])
     goal_theta = 0
 
@@ -331,7 +342,7 @@ def interactive(screen: pygame.Surface, rt: RoadTrain, ZOOM: float):
         w = np.clip(w, -np.pi/4, np.pi/4)
         w2 = np.clip(w2, -np.pi/4, np.pi/4)
 
-        rt.tick(dt, v, [w])
+        rt.tick(dt, v, w)
 
         rt.render(screen, zoom=ZOOM, pos=goal_pos)
 
@@ -346,16 +357,18 @@ def interactive(screen: pygame.Surface, rt: RoadTrain, ZOOM: float):
     return None
 
 
-def control(screen: pygame.Surface, rt: RoadTrain, ZOOM: float):
-    sim_duration = 30
-    goal_pos = np.array([0.1, 20])
-    goal_theta = 0
+def control(screen: pygame.Surface, rt: GeneralNTrailer1Steer, ZOOM: float):
+    sim_duration = 60
+    goal_pos = np.array([1, 20])
+    goal_theta = np.deg2rad(0)
 
     dt = 0.1
     # pred_horizon = 80 if len(rt.thetas) == 2 else 120
-    pred_horizon = 80
+    pred_horizon = 140
+    max_iter = 1200
     model = setup_model(rt, goal_pos, goal_theta)
-    mpc = setup_mpc(rt, model, silence_solver=False, dt=dt, pred_horizon=pred_horizon)
+    mpc = setup_mpc(rt, model, silence_solver=False, 
+                    dt=dt, pred_horizon=pred_horizon, max_iter=max_iter)
 
     mpc.x0["pos"] = rt.pos_front
     mpc.x0["theta"] = rt.thetas
@@ -382,8 +395,8 @@ def control(screen: pygame.Surface, rt: RoadTrain, ZOOM: float):
     # mpc_graphics.add_line(var_type='_x', var_name='theta', axis=ax3)
 
     # ax4 = plt.subplot(5, 1, 4)
-    # ax4.set_ylabel('Alpha')
-    # mpc_graphics.add_line(var_type='_u', var_name='alpha', axis=ax4)
+    # ax4.set_ylabel('phi')
+    # mpc_graphics.add_line(var_type='_u', var_name='phi', axis=ax4)
 
     # ax5 = plt.subplot(5, 1, 5)
     # ax5.set_ylabel("v0")
@@ -415,8 +428,8 @@ def control(screen: pygame.Surface, rt: RoadTrain, ZOOM: float):
             u = list(u.flatten())
             # Apply control
             v0 = u[0]
-            alpha = u[1:]
-            rt.tick(dt, v0, alpha)
+            phi = u[1]
+            rt.tick(dt, v0, phi)
             # Plot results
             # mpc_graphics.plot_results()
             # mpc_graphics.plot_predictions()
@@ -446,8 +459,8 @@ def control(screen: pygame.Surface, rt: RoadTrain, ZOOM: float):
     #         u = list(u.flatten())
     #         # Apply control
     #         v0 = u[0]
-    #         alpha = u[1:]
-    #         rt.tick(dt, v0, alpha)
+    #         phi = u[1:]
+    #         rt.tick(dt, v0, phi)
     #     # Plot results
     #     mpc_graphics.plot_results()
     #     mpc_graphics.plot_predictions()
@@ -475,8 +488,9 @@ def main():
     # screen = pygame.display.set_mode((1280, 720))
     screen = pygame.display.set_mode((1600, 1600))
 
-    rt = RoadTrain(np.array([0, 0]), wheelbase0=4, track0=3)
-    rt.add_trailer(wheelbase=6, track=3, bar_dist=8, has_steering=False)
+    rt = GeneralNTrailer1Steer(np.array([0, 0]), wheelbase0=4, track0=3)
+    rt.add_trailer(wheelbase=6, track=3, bar_dist=8, hitch_dist=1)
+    rt.add_trailer(wheelbase=6, track=3, bar_dist=8, hitch_dist=2)
     # rt.add_trailer(wheelbase=3, track=3, hitch_dist=5, has_steering=False)
     # rt.add_trailer(wheelbase=6, track=3, hitch_dist=8, has_steering=False)
     # rt.add_trailer(wheelbase=3, track=3, hitch_dist=5, has_steering=False)
