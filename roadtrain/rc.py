@@ -31,7 +31,7 @@ def receive_joystick_data():
         try:
             joystick_data = conn.recv(1024).decode('utf-8')  # Receive data from the client
             if joystick_data:
-                print(f"Joystick Input Received: {joystick_data}")
+                # print(f"Joystick Input Received: {joystick_data}")
                 global joy
                 joy = json.loads(joystick_data)
         except Exception as e:
@@ -44,7 +44,8 @@ joystick_thread = threading.Thread(target=receive_joystick_data, daemon=True).st
 
 
 # Set up the socket
-HOST = '192.168.4.1'
+# HOST = '192.168.4.1'
+HOST = '192.168.6.3'
 PORT = 80
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -68,26 +69,21 @@ def receive_data():
 # Start the receiving thread
 thread = threading.Thread(target=receive_data, daemon=True).start()
 
+DEAD_ZONE = 0.03
+
 try:
     while True:
         if joy is not None:
-            left_x = joy["axes"][0]
-            left_y = joy["axes"][1]
-            data = json.dumps({'left_x': left_x, 'left_y': left_y})
+            left_x = round(joy["axes"][0], 3)
+            left_y = round(joy["axes"][1], 3)
+            if abs(left_x) < DEAD_ZONE:
+                left_x = 0
+            if abs(left_y) < DEAD_ZONE:
+                left_y = 0
+            data = str([left_x, left_y])
+            print(data)
             sock.sendall(data.encode('utf-8'))
-        time.sleep(0.1)
-        # # Get joystick values
-        # x_axis = joystick.get_axis(0)  # Left stick horizontal
-        # y_axis = joystick.get_axis(1)  # Left stick vertical
-        
-        # # Prepare data to send
-        # data = json.dumps({'x': x_axis, 'y': y_axis})
-        # sock.sendall(data.encode('utf-8'))
-        
-        # # Print sent data
-        # print(f"Sent: {data}")
-        
-        # pygame.time.wait(100)  # Limit the loop to 10Hz
+        time.sleep(0.05)
 except KeyboardInterrupt:
     print("Exiting...")
     thread.join()
@@ -96,4 +92,3 @@ finally:
     sock.close()
     conn.close()
     joystick_sock.close()
-    # pygame.quit()
